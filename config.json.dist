@@ -1,0 +1,10 @@
+{
+  "imageDir": "/path/to/folder",
+  "ramdiskDir": "/mnt/RAMDisk",
+  "rabbitmqUrl": "amqp://myuser:mypassword@server.local",
+  "queueName": "image_conversion_jobs",
+  "grpcPort": "0.0.0.0:50051",
+  "grpcServerUrl": "server.local:50051",
+  "cjxlPath": "cjxl",
+  "maxMessageSize": 157286400
+}

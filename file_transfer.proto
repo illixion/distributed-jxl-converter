@@ -1,0 +1,23 @@
+syntax = "proto3";
+
+package fileTransfer;
+
+service FileTransfer {
+    rpc getFile (FileRequest) returns (FileResponse);
+    rpc uploadFile (FileUpload) returns (Empty);
+}
+
+message FileRequest {
+    string fileName = 1;
+}
+
+message FileResponse {
+    bytes fileContent = 1;
+}
+
+message FileUpload {
+    string fileName = 1;
+    bytes fileContent = 2;
+}
+
+message Empty {}
