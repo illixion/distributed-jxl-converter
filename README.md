@@ -27,8 +27,21 @@ Both client and server are simple to read and modify to use any other command th
 
 - Node.js (>= 14.x)
 - RabbitMQ
-- gRPC
 - `cjxl` (JPEG XL encoder)
+
+To setup RabbitMQ, follow instructions on the [official RabbitMQ page here](https://www.rabbitmq.com/docs/download), for example on macOS the commands would be:
+
+```sh
+brew install rabbitmq
+rabbitmqctl enable_feature_flag all
+```
+
+You'll also need to create a user for your clients using these commands:
+
+```sh
+rabbitmqctl add_user myuser mypassword
+rabbitmqctl set_permissions -p / myuser ".*" ".*" ".*"
+```
 
 ## Configuration
 
@@ -45,23 +58,7 @@ Rename the included `config.json.dist` to `config.json` and adjust the following
 
 ### Server
 
-1. Setup RabbitMQ:
-
-    Follow instructions on the [official RabbitMQ page here](https://www.rabbitmq.com/docs/download), for example on macOS the commands would be:
-
-    ```sh
-    brew install rabbitmq
-    rabbitmqctl enable_feature_flag all
-    ```
-
-    You'll also need to create a user for your clients using these commands:
-
-    ```sh
-    rabbitmqctl add_user myuser mypassword
-    rabbitmqctl set_permissions -p / myuser ".*" ".*" ".*"
-    ```
-
-2. Install dependencies:
+1. Install dependencies:
 
    ```bash
    npm install
