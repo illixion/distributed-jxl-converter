@@ -20,6 +20,7 @@ const fileTransferProto = grpc.loadPackageDefinition(packageDefinition).fileTran
 
 let server;
 let channel;
+let sentFiles = new Set();
 
 async function clearQueue(channel) {
     const queueStatus = await channel.checkQueue(config.queueName);
@@ -29,29 +30,24 @@ async function clearQueue(channel) {
     }
 }
 
-async function sendJobs() {
-    const connection = await amqp.connect(config.rabbitmqUrl);
-    channel = await connection.createChannel();
-    await channel.assertQueue(config.queueName, { durable: false });
-
-    await clearQueue(channel);
-
-    console.log("Reading file lists")
-    
+async function sendJobs(channel) {
+    console.log("Reading file lists");
     const files = fs.readdirSync(config.imageDir).filter(file => /\.(jpg|png)$/i.test(file));
-    
-    console.log("Sending jobs")
-    
+
+    console.log("Sending jobs");
     let numOfFiles = 0;
-    
     for (const file of files) {
+        if (sentFiles.has(file)) continue; // Skip duplicates within this runtime
+
         const filePath = path.join(config.imageDir, file);
         const job = { source: filePath, fileName: file };
         channel.sendToQueue(config.queueName, Buffer.from(JSON.stringify(job)), { persistent: false });
+
+        sentFiles.add(file); // Track the job in memory
         numOfFiles++;
     }
 
-    console.log(`${numOfFiles} jobs sent to the queue`);
+    console.log(`${numOfFiles} new jobs sent to the queue`);
 }
 
 function getFile(call, callback) {
@@ -92,7 +88,15 @@ function uploadFile(call, callback) {
     }
 }
 
-function main() {
+async function main() {
+    const connection = await amqp.connect(config.rabbitmqUrl);
+    channel = await connection.createChannel();
+    await channel.assertQueue(config.queueName, { durable: false });
+
+    // Clear queue on startup
+    await clearQueue(channel);
+
+    // Start the gRPC server
     server = new grpc.Server({
         'grpc.max_receive_message_length': config.maxMessageSize,
         'grpc.max_send_message_length': config.maxMessageSize
@@ -103,22 +107,29 @@ function main() {
         console.log(`gRPC server listening on port ${config.grpcPort}`);
     });
 
-    sendJobs().catch(console.error);
+    // Send initial job list
+    sendJobs(channel).catch(console.error);
+
+    // Scan folder to send more jobs every 30 minutes
+    setInterval(async () => {
+        try {
+            await sendJobs(channel);
+        } catch (err) {
+            console.error("Error in sendJobs:", err);
+        }
+    }, 1800 * 1000);
 
     // Graceful shutdown
-    process.on('SIGINT', () => {
+    process.on('SIGINT', async () => {
         console.log('Shutting down server...');
         if (server) {
-            server.tryShutdown(() => {
+            server.tryShutdown(async () => {
                 console.log('gRPC server shut down.');
                 if (channel) {
-                    channel.close().then(() => {
-                        console.log('AMQP channel closed.');
-                        process.exit(0);
-                    });
-                } else {
-                    process.exit(0);
+                    await channel.close();
+                    console.log('AMQP channel closed.');
                 }
+                process.exit(0);
             });
         } else {
             process.exit(0);
@@ -126,4 +137,4 @@ function main() {
     });
 }
 
-main();
+main().catch(console.error);
