@@ -8,6 +8,9 @@ const process = require('process');
 // Load configuration
 const config = require('./config.json');
 
+// Broken file tracker for reruns
+const brokenFilesPath = './broken_files.json';
+
 const PROTO_PATH = './file_transfer.proto';
 const packageDefinition = protoLoader.loadSync(PROTO_PATH, {
     keepCase: true,
@@ -21,6 +24,7 @@ const fileTransferProto = grpc.loadPackageDefinition(packageDefinition).fileTran
 let server;
 let channel;
 let sentFiles = new Set();
+let brokenFiles = loadBrokenFiles();
 
 async function clearQueue(channel) {
     const queueStatus = await channel.checkQueue(config.queueName);
@@ -32,18 +36,20 @@ async function clearQueue(channel) {
 
 async function sendJobs(channel) {
     console.log("Reading file lists");
-    const files = fs.readdirSync(config.imageDir).filter(file => /\.(jpg|png)$/i.test(file));
+    const files = (await fs.promises.readdir(config.imageDir)).filter(file => /\.(jpg|png)$/i.test(file));
 
     console.log("Sending jobs");
     let numOfFiles = 0;
     for (const file of files) {
-        if (sentFiles.has(file)) continue; // Skip duplicates within this runtime
+        if (sentFiles.has(file) || brokenFiles.has(file)) {
+            continue; // Skip if already sent or marked as broken
+        }
 
         const filePath = path.join(config.imageDir, file);
         const job = { source: filePath, fileName: file };
         channel.sendToQueue(config.queueName, Buffer.from(JSON.stringify(job)), { persistent: false });
 
-        sentFiles.add(file); // Track the job in memory
+        sentFiles.add(file); // Mark file as sent
         numOfFiles++;
     }
 
@@ -65,27 +71,65 @@ function uploadFile(call, callback) {
     const { fileName, fileContent } = call.request;
     const filePath = path.join(config.imageDir, fileName);
     const tempFilePath = `${filePath}.tmp`;
-    const originalFilePath = filePath.replace('.jxl', '');
+    const baseName = path.parse(fileName).name
+    const convertedFilePath = path.join(config.imageDir, `${baseName}.${config.extension}`);
 
     try {
         fs.writeFileSync(tempFilePath, Buffer.from(fileContent));
         console.log(`Received converted file: ${fileName}`);
 
         // Atomically rename the temp file to the final file
-        fs.renameSync(tempFilePath, filePath.replace(/\.[a-zA-Z0-9]{3}(?=\.jxl$)/, ''));
+        fs.renameSync(tempFilePath, convertedFilePath);
 
         // Remove the original file if the conversion was successful
-        if (fs.existsSync(originalFilePath)) {
-            fs.unlinkSync(originalFilePath);
+        if (fs.existsSync(filePath)) {
+            fs.unlinkSync(filePath);
         }
         callback(null, {});
     } catch (error) {
         console.error(`Failed to upload file ${fileName}: ${error.message}`);
+        markFileAsBroken(fileName);
         if (fs.existsSync(tempFilePath)) {
             fs.unlinkSync(tempFilePath);
         }
         callback(error);
     }
+}
+
+async function listenForBrokenFiles(channel) {
+    await channel.assertQueue(config.brokenFilesQueueName, { durable: false });
+
+    console.log(`Listening for broken file reports on queue: ${config.brokenFilesQueueName}`);
+
+    channel.consume(config.brokenFilesQueueName, (msg) => {
+        if (msg !== null) {
+            try {
+                const { fileName } = JSON.parse(msg.content.toString());
+                console.log(`Received broken file report: ${fileName}`);
+
+                markFileAsBroken(fileName); // Persist it to broken_files.json
+            } catch (parseError) {
+                console.error(`Failed to parse broken file message: ${parseError.message}`);
+            }
+            channel.ack(msg); // Acknowledge message
+        }
+    });
+}
+
+function loadBrokenFiles() {
+    if (fs.existsSync(brokenFilesPath)) {
+        return new Set(JSON.parse(fs.readFileSync(brokenFilesPath, 'utf8')));
+    }
+    return new Set();
+}
+
+function saveBrokenFiles() {
+    fs.writeFileSync(brokenFilesPath, JSON.stringify([...brokenFiles]), 'utf8');
+}
+
+function markFileAsBroken(fileName) {
+    brokenFiles.add(fileName);
+    saveBrokenFiles();
 }
 
 async function main() {
@@ -96,6 +140,9 @@ async function main() {
     // Clear queue on startup
     await clearQueue(channel);
 
+    // Start listening for broken files
+    listenForBrokenFiles(channel).catch(console.error);
+
     // Start the gRPC server
     server = new grpc.Server({
         'grpc.max_receive_message_length': config.maxMessageSize,
@@ -103,7 +150,6 @@ async function main() {
     });
     server.addService(fileTransferProto.FileTransfer.service, { getFile, uploadFile });
     server.bindAsync(config.grpcPort, grpc.ServerCredentials.createInsecure(), () => {
-        server.start();
         console.log(`gRPC server listening on port ${config.grpcPort}`);
     });
 

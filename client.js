@@ -29,7 +29,7 @@ let channel;
 async function processJob(job, channel, msg) {
     const { source, fileName } = job;
     const localSource = path.join(config.ramdiskDir, fileName);
-    const localDest = path.join(config.ramdiskDir, `${fileName}.jxl`);
+    const localDest = path.join(config.ramdiskDir, `${fileName}.${config.extension}`);
 
     try {
         // Request the source file from the main server
@@ -66,6 +66,8 @@ async function processJob(job, channel, msg) {
                 } catch (cleanupError) {
                     console.error(`Failed to clean up files for ${fileName}: ${cleanupError.message}`);
                 }
+                // Notify server of broken file
+                reportBrokenFile(channel, fileName)
                 // Acknowledge the message to avoid requeueing
                 channel.ack(msg);
                 return;
@@ -74,7 +76,7 @@ async function processJob(job, channel, msg) {
             try {
                 // Read the converted file and send it back to the main server
                 const fileContent = fs.readFileSync(localDest);
-                client.uploadFile({ fileName: `${fileName}.jxl`, fileContent }, (err) => {
+                client.uploadFile({ fileName, fileContent }, (err) => {
                     if (err) {
                         console.error(`Failed to upload file ${fileName}: ${err.message}`);
                     } else {
@@ -113,12 +115,21 @@ async function processJob(job, channel, msg) {
         } catch (cleanupError) {
             console.error(`Failed to clean up files for ${fileName}: ${cleanupError.message}`);
         }
+        // Notify server of broken file
+        reportBrokenFile(channel, fileName)
         // Acknowledge the message to avoid requeueing
         channel.ack(msg);
     }
 }
 
-async function startWorker() {
+async function reportBrokenFile(channel, fileName) {
+    await channel.assertQueue(config.brokenFilesQueueName, { durable: false });
+
+    const message = JSON.stringify({ fileName });
+    channel.sendToQueue(config.brokenFilesQueueName, Buffer.from(message), { persistent: false });
+}
+
+async function main() {
     const connection = await amqp.connect(config.rabbitmqUrl);
     channel = await connection.createChannel();
     await channel.assertQueue(config.queueName, { durable: false });
@@ -145,4 +156,4 @@ async function startWorker() {
     });
 }
 
-startWorker().catch(console.error);
+main().catch(console.error);

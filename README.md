@@ -53,6 +53,9 @@ Rename the included `config.json.dist` to `config.json` and adjust the following
 - [server] `grpcPort`: gRPC will listen on this port on the server
 - [client] `grpcServerUrl`: change to use correct server IP and port for clients
 - [client] `cjxlPath`: change if `cjxl` is not in your `$PATH`
+- [both] `extension`: target file extension, change if you're not using JPEG-XL
+
+When updating, you'll need to sync your config file to add any new fields.
 
 ## Usage
 

@@ -3,8 +3,10 @@
   "ramdiskDir": "/mnt/RAMDisk",
   "rabbitmqUrl": "amqp://myuser:mypassword@server.local",
   "queueName": "image_conversion_jobs",
+  "brokenFilesQueueName": "broken_files",
   "grpcPort": "0.0.0.0:50051",
   "grpcServerUrl": "server.local:50051",
   "cjxlPath": "cjxl",
+  "extension": "jxl",
   "maxMessageSize": 157286400
 }
