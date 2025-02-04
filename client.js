@@ -1,6 +1,6 @@
 const amqp = require('amqplib');
 const { exec } = require('child_process');
-const fs = require('fs');
+const fs = require('fs').promises;
 const path = require('path');
 const os = require('os');
 const grpc = require('@grpc/grpc-js');
@@ -16,117 +16,90 @@ const packageDefinition = protoLoader.loadSync(PROTO_PATH, {
     longs: String,
     enums: String,
     defaults: true,
-    oneofs: true
+    oneofs: true,
 });
 const fileTransferProto = grpc.loadPackageDefinition(packageDefinition).fileTransfer;
 const client = new fileTransferProto.FileTransfer(config.grpcServerUrl, grpc.credentials.createInsecure(), {
     'grpc.max_receive_message_length': config.maxMessageSize,
-    'grpc.max_send_message_length': config.maxMessageSize
+    'grpc.max_send_message_length': config.maxMessageSize,
 });
 
 let channel;
 
-async function processJob(job, channel, msg) {
-    const { source, fileName } = job;
+async function getFileFromServer(fileName) {
+    return new Promise((resolve, reject) => {
+        client.getFile({ fileName }, (err, response) => {
+            if (err) return reject(err);
+            resolve(response.fileContent);
+        });
+    });
+}
+
+async function uploadFileToServer(fileName, fileContent) {
+    return new Promise((resolve, reject) => {
+        client.uploadFile({ fileName, fileContent }, (err) => {
+            if (err) return reject(err);
+            resolve();
+        });
+    });
+}
+
+async function executeCommand(command) {
+    return new Promise((resolve, reject) => {
+        exec(command, (error) => {
+            if (error) return reject(error);
+            resolve();
+        });
+    });
+}
+
+async function cleanUpFiles(...files) {
+    for (const file of files) {
+        try {
+            await fs.unlink(file);
+        } catch (err) {
+            console.error(`Failed to clean up file ${file}: ${err.message}`);
+        }
+    }
+}
+
+async function reportBrokenFile(fileName) {
+    await channel.assertQueue(config.brokenFilesQueueName, { durable: false });
+    await channel.sendToQueue(config.brokenFilesQueueName, Buffer.from(JSON.stringify({ fileName })), { persistent: false });
+}
+
+async function processJob(job, msg) {
+    const { fileName } = job;
     const localSource = path.join(config.ramdiskDir, fileName);
     const localDest = path.join(config.ramdiskDir, `${fileName}.${config.extension}`);
 
     try {
-        // Request the source file from the main server
-        const fileResponse = await new Promise((resolve, reject) => {
-            client.getFile({ fileName }, (err, response) => {
-                if (err) {
-                    reject(err);
-                } else {
-                    resolve(response);
-                }
-            });
-        });
+        // Retrieve file
+        const fileContent = await getFileFromServer(fileName);
+        await fs.writeFile(localSource, Buffer.from(fileContent));
 
-        fs.writeFileSync(localSource, Buffer.from(fileResponse.fileContent));
+        // Validate file
+        const stats = await fs.stat(localSource);
+        if (stats.size === 0) throw new Error('Corrupted image file (size is 0)');
 
-        // Check if the file is corrupted (simple check: file size > 0)
-        const stats = fs.statSync(localSource);
-        if (stats.size === 0) {
-            throw new Error('Corrupted image file (size is 0)');
-        }
+        // Process file
+        await executeCommand(`"${config.cjxlPath}" --quiet --num_threads=0 --lossless_jpeg=1 -d 0 "${localSource}" "${localDest}"`);
 
-        // Convert the file using cjxl
-        exec(`"${config.cjxlPath}" --quiet --num_threads=0 --lossless_jpeg=1 -d 0 "${localSource}" "${localDest}"`, (err) => {
-            if (err) {
-                console.error(`Error converting file: ${err}`);
-                // Clean up local files
-                try {
-                    if (fs.existsSync(localSource)) {
-                        fs.unlinkSync(localSource);
-                    }
-                    if (fs.existsSync(localDest)) {
-                        fs.unlinkSync(localDest);
-                    }
-                } catch (cleanupError) {
-                    console.error(`Failed to clean up files for ${fileName}: ${cleanupError.message}`);
-                }
-                // Notify server of broken file
-                reportBrokenFile(channel, fileName)
-                // Acknowledge the message to avoid requeueing
-                channel.ack(msg);
-                return;
-            }
+        // Read processed file
+        const processedFileContent = await fs.readFile(localDest);
 
-            try {
-                // Read the converted file and send it back to the main server
-                const fileContent = fs.readFileSync(localDest);
-                client.uploadFile({ fileName, fileContent }, (err) => {
-                    if (err) {
-                        console.error(`Failed to upload file ${fileName}: ${err.message}`);
-                    } else {
-                        console.log(`Successfully processed ${fileName}`);
-                    }
-                });
-            } catch (fileError) {
-                console.error(`Failed to process file ${fileName}: ${fileError.message}`);
-            } finally {
-                // Clean up local files
-                try {
-                    if (fs.existsSync(localSource)) {
-                        fs.unlinkSync(localSource);
-                    }
-                    if (fs.existsSync(localDest)) {
-                        fs.unlinkSync(localDest);
-                    }
-                } catch (cleanupError) {
-                    console.error(`Failed to clean up files for ${fileName}: ${cleanupError.message}`);
-                }
+        // Upload file asynchronously
+        uploadFileToServer(fileName, processedFileContent)
+            .then(() => console.log(`Successfully uploaded ${fileName}`))
+            .catch(err => console.error(`Failed to upload ${fileName}: ${err.message}`));
 
-                // Acknowledge the message
-                channel.ack(msg);
-            }
-        });
     } catch (error) {
-        console.error(`Failed to process job for ${fileName}: ${error.message}`);
-        // Clean up local files
-        try {
-            if (fs.existsSync(localSource)) {
-                fs.unlinkSync(localSource);
-            }
-            if (fs.existsSync(localDest)) {
-                fs.unlinkSync(localDest);
-            }
-        } catch (cleanupError) {
-            console.error(`Failed to clean up files for ${fileName}: ${cleanupError.message}`);
-        }
-        // Notify server of broken file
-        reportBrokenFile(channel, fileName)
-        // Acknowledge the message to avoid requeueing
-        channel.ack(msg);
+        console.error(`Failed to process ${fileName}: ${error.message}`);
+        await reportBrokenFile(fileName);
+    } finally {
+        await cleanUpFiles(localSource, localDest);
+        channel.ack(msg); // Acknowledge message immediately
     }
-}
-
-async function reportBrokenFile(channel, fileName) {
-    await channel.assertQueue(config.brokenFilesQueueName, { durable: false });
-
-    const message = JSON.stringify({ fileName });
-    channel.sendToQueue(config.brokenFilesQueueName, Buffer.from(message), { persistent: false });
 }
 
 async function main() {
@@ -136,23 +109,19 @@ async function main() {
     channel.prefetch(NUM_CORES);
 
     channel.consume(config.queueName, async (msg) => {
-        if (msg !== null) {
+        if (msg) {
             const job = JSON.parse(msg.content.toString());
-            await processJob(job, channel, msg);
+            await processJob(job, msg);
         }
     }, { noAck: false });
 
-    // Graceful shutdown
-    process.on('SIGINT', () => {
+    process.on('SIGINT', async () => {
         console.log('Shutting down client...');
         if (channel) {
-            channel.close().then(() => {
-                console.log('AMQP channel closed.');
-                process.exit(0);
-            });
-        } else {
-            process.exit(0);
+            await channel.close();
+            console.log('AMQP channel closed.');
         }
+        process.exit(0);
     });
 }
 
