@@ -1,12 +1,13 @@
 {
-  "imageDir": "/path/to/folder",
-  "ramdiskDir": "/mnt/RAMDisk",
   "rabbitmqUrl": "amqp://myuser:mypassword@server.local",
   "queueName": "image_conversion_jobs",
   "brokenFilesQueueName": "broken_files",
-  "grpcPort": "0.0.0.0:50051",
-  "grpcServerUrl": "server.local:50051",
+  "imageDir": "/path/to/source/folder",
+  "restServerUrl": "http://server.local:3000",
+  "uploadRestServerUrl": "http://server.local:3000",
+  "ramdiskDir": "/mnt/RAMDisk",
   "cjxlPath": "cjxl",
+  "djxlPath": "djxl",
   "extension": "jxl",
-  "maxMessageSize": 157286400
+  "imageProcessor": "sharp"
 }

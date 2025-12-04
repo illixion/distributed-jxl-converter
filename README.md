@@ -47,15 +47,76 @@ rabbitmqctl set_permissions -p / myuser ".*" ".*" ".*"
 
 Rename the included `config.json.dist` to `config.json` and adjust the following settings:
 
-- [server] `imageDir`: This folder should contain the originals and will also be the destination, **originals are deleted automatically** on success.
-- [client] `ramdiskDir`: path to a temp folder, or ideally a RAM disk to avoid wear on disk
-- [client] `rabbitmqUrl`: Change to use the correct credentials and server address for clients
-- [server] `grpcPort`: gRPC will listen on this port on the server
-- [client] `grpcServerUrl`: change to use correct server IP and port for clients
-- [client] `cjxlPath`: change if `cjxl` is not in your `$PATH`
-- [both] `extension`: target file extension, change if you're not using JPEG-XL
+- rabbitmqUrl (string) — required (client & server)  
+  Example: "amqp://user:pass@host"  
+  Full AMQP connection URL used by clients/servers to connect to RabbitMQ.
 
-When updating, you'll need to sync your config file to add any new fields.
+- queueName (string) — required (both)  
+  Example: "image_conversion_jobs"  
+  Name of the RabbitMQ queue used to send conversion jobs.
+
+- brokenFilesQueueName (string) — required (both)  
+  Example: "broken_files"  
+  Name of the queue where clients report files that failed processing.
+
+- imageDir (string) — required (server)  
+  Example: "/path/to/source/folder"  
+  Directory on the server containing original images. Originals are deleted on successful conversion.
+
+- restServerUrl (string) — required (client)  
+  Example: "http://server.local:3000"  
+  Base URL used by clients to GET original files (server provides /file/:name endpoint).
+
+- uploadRestServerUrl (string) — required (client)  
+  Example: "http://server.local:3000"  
+  Base URL used by clients to POST converted files to the server (/upload endpoint).
+
+- ramdiskDir (string) — required (client)  
+  Example: "/mnt/RAMDisk"  
+  Local temp folder (ideally a RAM disk) used by clients for intermediate files.
+
+- cjxlPath (string) — optional (client)  
+  Example: "cjxl" or "/usr/local/bin/cjxl"  
+  Path to the cjxl binary. Required only when imageProcessor is set to "cjxl".
+
+- djxlPath (string) — optional (server)  
+  Example: "djxl"  
+  Path to the djxl binary (used by server-side utilities if present).
+
+- extension (string) — required (both)  
+  Example: "jxl"  
+  Target file extension for converted images.
+
+- imageProcessor (string) — optional (client) — default "sharp"  
+  Allowed values: "sharp" or "cjxl"  
+  Selects the encoder used by clients:
+  - "sharp": use the sharp Node.js binding (libvips) to write JXL. Does not support writing JXL metadata.
+  - "cjxl": call the external cjxl binary (requires cjxlPath). Use this to preserve metadata / use native encoder.
+
+### Notes
+
+- When using "cjxl", ensure cjxlPath points to a working cjxl binary and that system resources (temp/RAM disk) are available, since cjxl uses files rather than pipes.  
+- ramdiskDir should be writable and fast to avoid disk wear and to maximize throughput.  
+- Keep rabbitmqUrl and network URLs reachable from clients.  
+- Sync any new config fields from config.json.dist to your config.json when upgrading.  
+
+### Example `config.json`
+
+```json
+{
+  "rabbitmqUrl": "amqp://myuser:mypassword@server.local",
+  "queueName": "image_conversion_jobs",
+  "brokenFilesQueueName": "broken_files",
+  "imageDir": "/path/to/source/folder",
+  "restServerUrl": "http://server.local:3000",
+  "uploadRestServerUrl": "http://server.local:3000",
+  "ramdiskDir": "/mnt/RAMDisk",
+  "cjxlPath": "cjxl",
+  "djxlPath": "djxl",
+  "extension": "jxl",
+  "imageProcessor": "sharp"
+}
+```
 
 ## Usage
 

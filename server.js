@@ -1,8 +1,9 @@
 const amqp = require('amqplib');
 const fs = require('fs');
 const path = require('path');
-const grpc = require('@grpc/grpc-js');
-const protoLoader = require('@grpc/proto-loader');
+const express = require('express');
+const cors = require('cors');
+const multer = require('multer');
 const process = require('process');
 
 // Load configuration
@@ -11,20 +12,46 @@ const config = require('./config.json');
 // Broken file tracker for reruns
 const brokenFilesPath = './broken_files.json';
 
-const PROTO_PATH = './file_transfer.proto';
-const packageDefinition = protoLoader.loadSync(PROTO_PATH, {
-    keepCase: true,
-    longs: String,
-    enums: String,
-    defaults: true,
-    oneofs: true
-});
-const fileTransferProto = grpc.loadPackageDefinition(packageDefinition).fileTransfer;
 
 let server;
 let channel;
 let sentFiles = new Set();
 let brokenFiles = loadBrokenFiles();
+const upload = multer({ limits: { fileSize: Number.MAX_SAFE_INTEGER } });
+
+// REST API for file transfer
+const app = express();
+app.use(cors());
+app.use(express.json());
+
+function isAPNG(filePath) {
+  const SIGNATURE = Buffer.from([0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A]);
+
+  const buffer = fs.readFileSync(filePath);
+
+  // Check PNG signature
+  if (!buffer.slice(0, 8).equals(SIGNATURE)) {
+    return false; // Not a PNG file
+  }
+
+  let offset = 8;
+  while (offset < buffer.length) {
+    const length = buffer.readUInt32BE(offset);
+    const type = buffer.slice(offset + 4, offset + 8).toString('ascii');
+
+    if (type === 'acTL') {
+      return true; // Found animation control chunk
+    }
+
+    if (type === 'IEND') {
+      break;
+    }
+
+    offset += 12 + length; // 4 bytes length + 4 bytes type + data + 4 bytes CRC
+  }
+
+  return false;
+}
 
 async function clearQueue(channel) {
     const queueStatus = await channel.checkQueue(config.queueName);
@@ -34,15 +61,36 @@ async function clearQueue(channel) {
     }
 }
 
+async function getAllFiles(dir, fileList = []) {
+    const entries = await fs.promises.readdir(dir, { withFileTypes: true });
+    for (const entry of entries) {
+        const fullPath = path.join(dir, entry.name);
+        if (entry.isDirectory()) {
+            await getAllFiles(fullPath, fileList);
+        } else if (/\.(jpg|png|jxl)$/i.test(entry.name)) {
+            fileList.push(fullPath);
+        }
+    }
+    return fileList;
+}
+
 async function sendJobs(channel) {
-    console.log("Reading file lists");
-    const files = (await fs.promises.readdir(config.imageDir)).filter(file => /\.(jpg|png)$/i.test(file));
+    console.log("Reading file lists recursively");
+    const allFiles = await getAllFiles(config.imageDir);
+    const files = allFiles.map(f => path.relative(config.imageDir, f));
 
     console.log("Sending jobs");
     let numOfFiles = 0;
     for (const file of files) {
-        if (sentFiles.has(file) || brokenFiles.has(file)) {
-            continue; // Skip if already sent or marked as broken
+        if (brokenFiles.has(file) || completedFiles.has(file) || sentFiles.has(file)) {
+            continue; // Skip if already sent, marked as broken, or completed
+        }
+
+        // If file format is PNG and isAPNG returns true, skip it
+        if (path.extname(file).toLowerCase() === '.png' && isAPNG(path.join(config.imageDir, file))) {
+            console.log(`Skipping animated PNG file: ${file}`);
+            markFileAsBroken(file);
+            continue;
         }
 
         const filePath = path.join(config.imageDir, file);
@@ -56,44 +104,64 @@ async function sendJobs(channel) {
     console.log(`${numOfFiles} new jobs sent to the queue`);
 }
 
-function getFile(call, callback) {
-    const { fileName } = call.request;
-    const filePath = path.join(config.imageDir, fileName);
-    if (fs.existsSync(filePath)) {
-        const fileContent = fs.readFileSync(filePath);
-        callback(null, { fileContent });
-    } else {
-        callback(new Error(`File not found: ${fileName}`));
+// Download file endpoint (supports subfolder syntax: /file/:folder/:fileName)
+app.get('/file/:folder/:fileName', (req, res) => {
+    const { folder, fileName } = req.params;
+    const safeBase = path.resolve(config.imageDir);
+    const requestedPath = path.resolve(config.imageDir, folder, fileName);
+    if (!requestedPath.startsWith(safeBase + path.sep)) {
+        return res.status(400).json({ error: 'Invalid file path.' });
     }
-}
+    if (fs.existsSync(requestedPath)) {
+        res.sendFile(requestedPath);
+    } else {
+        res.status(404).json({ error: `File not found: ${folder}/${fileName}` });
+    }
+});
 
-function uploadFile(call, callback) {
-    const { fileName, fileContent } = call.request;
-    const filePath = path.join(config.imageDir, fileName);
-    const tempFilePath = `${filePath}.tmp`;
-    const baseName = path.parse(fileName).name
+// Upload file endpoint
+app.post('/upload', upload.single('file'), (req, res) => {
+    const { originalname } = req.file;
+    const { fileName } = req.body;
+    const baseName = path.parse(fileName).name;
+    const folderName = Math.floor(baseName / CHUNK_SIZE);
     const convertedFilePath = path.join(config.imageDir, `${baseName}.${config.extension}`);
-
+    const tempFilePath = `${convertedFilePath}.tmp`;
     try {
-        fs.writeFileSync(tempFilePath, Buffer.from(fileContent));
+        fs.mkdirSync(path.dirname(convertedFilePath), { recursive: true });
+        fs.writeFileSync(tempFilePath, req.file.buffer);
         console.log(`Received converted file: ${fileName}`);
-
-        // Atomically rename the temp file to the final file
         fs.renameSync(tempFilePath, convertedFilePath);
-
-        // Remove the original file if the conversion was successful
-        if (fs.existsSync(filePath)) {
-            fs.unlinkSync(filePath);
-        }
-        callback(null, {});
+        res.json({ success: true });
     } catch (error) {
         console.error(`Failed to upload file ${fileName}: ${error.message}`);
         markFileAsBroken(fileName);
         if (fs.existsSync(tempFilePath)) {
             fs.unlinkSync(tempFilePath);
         }
-        callback(error);
+        res.status(500).json({ error: error.message });
     }
+});
+
+const REST_PORT = config.restPort || 3000;
+app.listen(REST_PORT, () => {
+    console.log(`REST API server listening on port ${REST_PORT}`);
+});
+
+function loadBrokenFiles() {
+    if (fs.existsSync(brokenFilesPath)) {
+        return new Set(JSON.parse(fs.readFileSync(brokenFilesPath, 'utf8')));
+    }
+    return new Set();
+}
+
+function saveBrokenFiles() {
+    fs.writeFileSync(brokenFilesPath, JSON.stringify([...brokenFiles]), 'utf8');
+}
+
+function markFileAsBroken(fileName) {
+    brokenFiles.add(fileName);
+    saveBrokenFiles();
 }
 
 async function listenForBrokenFiles(channel) {
@@ -116,21 +184,6 @@ async function listenForBrokenFiles(channel) {
     });
 }
 
-function loadBrokenFiles() {
-    if (fs.existsSync(brokenFilesPath)) {
-        return new Set(JSON.parse(fs.readFileSync(brokenFilesPath, 'utf8')));
-    }
-    return new Set();
-}
-
-function saveBrokenFiles() {
-    fs.writeFileSync(brokenFilesPath, JSON.stringify([...brokenFiles]), 'utf8');
-}
-
-function markFileAsBroken(fileName) {
-    brokenFiles.add(fileName);
-    saveBrokenFiles();
-}
 
 async function main() {
     const connection = await amqp.connect(config.rabbitmqUrl);
@@ -143,34 +196,15 @@ async function main() {
     // Start listening for broken files
     listenForBrokenFiles(channel).catch(console.error);
 
-    // Start the gRPC server
-    server = new grpc.Server({
-        'grpc.max_receive_message_length': config.maxMessageSize,
-        'grpc.max_send_message_length': config.maxMessageSize
-    });
-    server.addService(fileTransferProto.FileTransfer.service, { getFile, uploadFile });
-    server.bindAsync(config.grpcPort, grpc.ServerCredentials.createInsecure(), () => {
-        console.log(`gRPC server listening on port ${config.grpcPort}`);
-    });
-
     // Send initial job list
     sendJobs(channel).catch(console.error);
-
-    // Scan folder to send more jobs every 30 minutes
-    setInterval(async () => {
-        try {
-            await sendJobs(channel);
-        } catch (err) {
-            console.error("Error in sendJobs:", err);
-        }
-    }, 1800 * 1000);
 
     // Graceful shutdown
     process.on('SIGINT', async () => {
         console.log('Shutting down server...');
         if (server) {
             server.tryShutdown(async () => {
-                console.log('gRPC server shut down.');
+                console.log('Server shut down.');
                 if (channel) {
                     await channel.close();
                     console.log('AMQP channel closed.');
