@@ -1,6 +1,6 @@
 # Distributed JXL Image Converter
 
-This repository contains a proof-of-concept solution that I wrote to convert a few million images to JPEG-XL with work distributed across multiple computers using RabbitMQ and gRPC.
+This repository contains a proof-of-concept solution that I wrote to convert a few million images to JPEG-XL with work distributed across multiple computers using RabbitMQ and axios.
 
 ## Table of Contents
 
@@ -14,13 +14,13 @@ This repository contains a proof-of-concept solution that I wrote to convert a f
 
 ## Overview
 
-This project demonstrates a distributed system for converting images to JXL format. It uses RabbitMQ for job queuing and gRPC for file transfer between the server and clients. As of writing this, there aren't any JPEG-XL encoders for NodeJS that support writing metadata, which is something that I wanted to fix with this project. This was done by calling `cjxl` via child_process with one instance per machine core, although since it doesn't support pipes the solution has to use a temp folder or a RAM disk on each worker.
+This project demonstrates a distributed system for converting images to JXL format. It uses RabbitMQ for job queuing and axios for file transfer between the server and clients. As of writing this, there aren't any JPEG-XL encoders for NodeJS that support writing metadata, which is something that I wanted to fix with this project. This was done by calling `cjxl` via child_process with one instance per machine core, although since it doesn't support pipes in all versions, we also use a temp folder or a RAM disk on each worker.
 
 Both client and server are simple to read and modify to use any other command that you'd like, for example if you want to use AVIF instead of JPEG-XL.
 
 ## Architecture
 
-- **Server**: Reads image files from a specified directory, sends conversion jobs to RabbitMQ, and provides gRPC services for file transfer.
+- **Server**: Reads image files from a specified directory, sends conversion jobs to RabbitMQ, and provides axios services for file transfer.
 - **Client**: Consumes jobs from RabbitMQ, requests the original image from the server, converts it to JXL format, and uploads the converted image back to the server.
 
 ## Prerequisites
