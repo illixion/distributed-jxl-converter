@@ -11,7 +11,7 @@
   "description": "",
   "dependencies": {
     "amqplib": "^0.10.8",
-    "axios": "^1.9.0",
+    "axios": "^1.13.5",
     "cors": "^2.8.5",
     "express": "^5.1.0",
     "form-data": "^4.0.2",
